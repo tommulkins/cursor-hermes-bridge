@@ -103,6 +103,10 @@ In a Hermes session:
 hermes mcp test cursor-agent
 ```
 
+### Streaming Progress
+
+During long tasks, the bridge pushes `agent_message_chunk` text as MCP `notifications/progress` events. Hermes shows these as partial output while Cursor is still working, so you're not staring at a blank terminal during complex tasks.
+
 ## ACP Protocol Details
 
 The bridge implements the [Agent Client Protocol](https://agentclientprotocol.com/) — JSON-RPC 2.0 over stdio, one message per line.
@@ -118,10 +122,10 @@ The bridge implements the [Agent Client Protocol](https://agentclientprotocol.co
 
 ## Improvements Needed
 
-See the [issues](https://github.com/tommulkins/cursor-hermes-bridge/issues) page for planned work:
+See the [issues](https://github.com/tommulkins/cursor-hermes-bridge/issues) page:
 
+- ~~Streaming progress via MCP notifications~~ ✅ Implemented
 - ACP process crash recovery (auto-restart)
-- Streaming progress via MCP notifications
 - Configurable model selection
 - Git worktree isolation per task
 - Graceful shutdown of ACP child process
