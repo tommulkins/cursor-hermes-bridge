@@ -1,0 +1,14 @@
+{
+  "name": "hermes-cursor-delegate",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Delegate coding tasks from Hermes Agent to Cursor via ACP (Agent Client Protocol)",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "mcp-server": "node src/cursor-mcp-server.js"
+  },
+  "dependencies": {}
+}
