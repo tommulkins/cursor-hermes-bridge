@@ -1,101 +1,132 @@
-# Hermes — Cursor Delegate
+# cursor-hermes-bridge
 
-Delegate coding work from **Hermes Agent** to **Cursor's local agent**
-with model `composer-2` via ACP (Agent Client Protocol).
+Bridge [Hermes Agent](https://hermes-agent.nousresearch.com) to **Cursor's composer-2 agent** via the **Agent Client Protocol (ACP)**. No API key needed — uses Cursor's existing login.
 
-The Cursor agent edits files on disk directly under the working directory —
-use a clean branch and review diffs before committing.
+## Why
 
-## How it works
+Hermes and Cursor are both powerful agents, but they speak different protocols:
+
+| Side | Protocol | Role |
+|---|---|---|
+| Hermes | **MCP** (Model Context Protocol) | Native tool integration — `hermes mcp add` |
+| Cursor | **ACP** (Agent Client Protocol) | Agent-to-client communication — `cursor agent acp` |
+
+This bridge translates between them. It lets Hermes hand off "serious coding" work to Cursor's composer-2 — the same model that powers Cursor's IDE — without opening a TUI, managing API keys, or blocking Hermes from working on other things.
+
+Before this bridge, the alternatives were:
+- `cursor agent --print` — one-shot CLI calls, no session persistence, blind `--yolo` permissions
+- `@cursor/sdk` — required a separate API key from cursor.com/dashboard/integrations
+
+ACP solves all of that: persistent sessions, streaming progress, permission-aware tool execution, and connection reuse across multiple prompts.
+
+## Architecture
 
 ```
-Hermes ←→ (MCP stdio) ←→ cursor-mcp-server.js ←→ (ACP stdio) ←→ cursor agent acp
+┌──────────────┐     MCP (stdio)      ┌──────────────────┐     ACP (stdio)      ┌────────────────┐
+│              │ ◄──────────────────► │                  │ ◄──────────────────► │                │
+│   Hermes     │                      │  cursor-hermes-  │                      │  cursor agent  │
+│   Agent      │                      │  bridge          │                      │  acp           │
+│              │                      │  (Node.js MCP    │                      │                │
+│              │                      │   server)        │                      │                │
+└──────────────┘                      └──────────────────┘                      └────────────────┘
+                                            │
+                                     JSON-RPC 2.0
+                                     newline-delimited
+                                     bidirectional
 ```
 
-A thin Node.js bridge translates Hermes's MCP tool calls into Cursor's ACP
-protocol. The whole connection is persistent — one ACP process stays alive
-across multiple tool calls, with optional session resume.
+Hermes sees a standard MCP tool called `cursor_agent_code`. Behind the scenes, the bridge:
+
+1. Spawns `cursor agent acp` as a persistent child process
+2. Authenticates using the existing Cursor login (`~/.cursor/cli-config.json`)
+3. Creates sessions via ACP's `session/new` with the target working directory
+4. Sends prompts as `ContentBlock[]` arrays via `session/prompt`
+5. Collects `session/update` notifications (agent message chunks)
+6. Auto-approves `session/request_permission` notifications
+7. Reconstructs the final response text and returns it to Hermes
+
+Sessions are cached per repository path. Setting `resume_session: true` loads the previous session, preserving conversation context across prompts — the agent remembers project architecture, conventions, and prior work.
 
 ## Requirements
 
-- [Cursor](https://cursor.com) installed and **logged in**
-  (`cursor agent login` if not yet done)
-- Node.js 20+ (22 recommended)
-- No API key — uses Cursor's existing login via `~/.cursor/cli-config.json`
+- [Cursor](https://cursor.com) installed and logged in (`cursor agent login`)
+- [Hermes Agent](https://hermes-agent.nousresearch.com) installed
+- Node.js 20+
+- No API key
 
-## Install
+## Quick Start
 
 ```bash
-cd ~/.hermes/integrations/hermes-cursor-delegate
-npm install
+# Clone
+git clone https://github.com/tommulkins/cursor-hermes-bridge.git ~/.hermes/integrations/cursor-hermes-bridge
+cd ~/.hermes/integrations/cursor-hermes-bridge
+
+# No dependencies to install — it's pure Node.js stdlib
 ```
 
-That's it — no `.env`, no API key.
-
-## Hermes Wiring (MCP)
-
-Register the bridge as an MCP server:
+Register with Hermes:
 
 ```bash
 hermes mcp add cursor-agent \
-  --command "node ~/.hermes/integrations/hermes-cursor-delegate/src/cursor-mcp-server.js"
+  --command node \
+  --args /absolute/path/to/cursor-hermes-bridge/src/cursor-mcp-server.js
 ```
 
-After registration, Hermes discovers the `cursor_agent_code` tool in every
-new session. Use `/reset` if already running.
+After registration, `cursor_agent_code` appears as a tool in every new Hermes session (`/reset` if already running).
+
+## Usage
 
 ### Tool: `cursor_agent_code`
 
-```json
-{
-  "prompt": "string (required) — the coding task",
-  "repo_path": "string (optional) — override working directory",
-  "resume_session": "boolean (optional) — continue previous conversation"
-}
-```
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `prompt` | string | yes | The coding task. Be specific and self-contained. |
+| `repo_path` | string | no | Working directory. Defaults to git root from cwd, then cwd. |
+| `resume_session` | boolean | no | Continue the previous session for this repo (default: false). |
+
+### Example
+
+In a Hermes session:
+
+> Use cursor_agent_code to refactor the rate limiter in src/middleware/auth.ts to use async/await
+
+### Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `CURSOR_REPO` | Override working directory (takes precedence over `repo_path` arg). |
+| `HERMES_CURSOR_REPO` | Fallback alias for `CURSOR_REPO`. |
 
 ### Verify
 
 ```bash
 hermes mcp test cursor-agent
-hermes mcp list
 ```
 
-## Environment Variables
+## ACP Protocol Details
 
-| Variable | Purpose |
-|---|---|
-| `CURSOR_REPO` | Optional. Absolute path to working directory. |
-| `HERMES_CURSOR_REPO` | Fallback alias for `CURSOR_REPO`. |
+The bridge implements the [Agent Client Protocol](https://agentclientprotocol.com/) — JSON-RPC 2.0 over stdio, one message per line.
 
-**Resolution order:** `repo_path` arg → `CURSOR_REPO` → `HERMES_CURSOR_REPO` →
-git repo root from cwd → cwd.
+**Sequence:**
 
-## Session Persistence
+1. `initialize` — negotiate protocol version (v1)
+2. `authenticate` — method `cursor_login` (uses stored credentials)
+3. `session/new` — requires `{ cwd: string, mcpServers: [] }`
+4. `session/prompt` — prompt is `ContentBlock[]`, e.g. `[{ type: "text", text: "..." }]`
+5. `session/update` notifications carry `agent_message_chunk` with incremental text
+6. `session/request_permission` — bridge responds `allow-always`
 
-Set `resume_session: true` to keep conversation context across prompts.
-The bridge caches the session per-repo-path, so the next prompt to the
-same repo picks up where the last one left off — the agent remembers
-architecture, conventions, and prior work.
+## Improvements Needed
 
-## Safety
+See the [issues](https://github.com/tommulkins/cursor-hermes-bridge/issues) page for planned work:
 
-- The Cursor agent **edits files on disk directly**.
-- Permission requests are auto-approved (equivalent to Cursor IDE's agent
-  mode — `cursor agent --yolo`).
-- Always use a clean branch before delegating:
-  ```bash
-  git checkout -b cursor-agent-work
-  ```
-- Review diffs before committing.
+- ACP process crash recovery (auto-restart)
+- Streaming progress via MCP notifications
+- Configurable model selection
+- Git worktree isolation per task
+- Graceful shutdown of ACP child process
+- Concurrent session support
 
-## Project Structure
+## License
 
-```
-~/.hermes/integrations/hermes-cursor-delegate/
-├── package.json              # ESM package (zero external deps)
-├── README.md                 # This file
-└── src/
-    ├── acp-client.js         # ACP protocol client (persistent connection)
-    └── cursor-mcp-server.js  # stdio MCP server (protocol bridge)
-```
+MIT
