@@ -132,13 +132,21 @@ export class AcpClient {
    * Permission requests are auto-approved.
    * @param {string} sessionId
    * @param {string} prompt
+   * @param {function|null} onUpdate - Optional callback invoked on each
+   *   session/update notification with the full params object. The callback
+   *   receives real-time updates as the agent streams them.
    * @returns {Promise<{updates: object[], result: object}>}
    */
-  async sendPrompt(sessionId, prompt) {
+  async sendPrompt(sessionId, prompt, onUpdate = null) {
     this._debug(`Prompting session ${sessionId}: "${prompt.substring(0, 80)}..."`);
 
     const allUpdates = [];
-    const handler = (params) => { allUpdates.push(params); };
+    const handler = (params) => {
+      allUpdates.push(params);
+      if (typeof onUpdate === "function") {
+        onUpdate(params);
+      }
+    };
     this.onNotification("session/update", handler);
 
     try {

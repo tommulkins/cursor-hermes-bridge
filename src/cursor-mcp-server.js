@@ -137,9 +137,9 @@ async function ensureSession(repoPath, resume = false) {
   return sessionId;
 }
 
-async function runPrompt(prompt, repoPath, resume = false) {
+async function runPrompt(prompt, repoPath, resume = false, onUpdate = null) {
   const sessionId = await ensureSession(repoPath, resume);
-  const { updates } = await acp.sendPrompt(sessionId, prompt);
+  const { updates } = await acp.sendPrompt(sessionId, prompt, onUpdate);
 
   // Reconstruct text from agent_message_chunk updates
   const textChunks = [];
@@ -219,10 +219,27 @@ async function handleRequest(msg) {
       try {
         sendProgress(id, 0, 1, "Starting Cursor agent...");
 
+        const onUpdate = (params) => {
+          // Only forward agent_message_chunk updates as progress notifications
+          if (params?.update?.sessionUpdate === "agent_message_chunk") {
+            const content = params.update.content;
+            if (content?.type === "text" && content.text) {
+              try {
+                sendProgress(id, 0.5, 1, content.text);
+              } catch (progressErr) {
+                process.stderr.write(
+                  `[cursor-mcp] progress notification error: ${progressErr}\n`
+                );
+              }
+            }
+          }
+        };
+
         const { sessionId, text } = await runPrompt(
           prompt.trim(),
           repoPath,
-          resume
+          resume,
+          onUpdate
         );
 
         sendResponse(id, {
